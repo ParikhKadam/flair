@@ -2,17 +2,12 @@ import itertools
 import logging
 import typing
 from abc import ABC, abstractmethod
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import (
     Any,
-    Dict,
-    Iterator,
-    List,
     NamedTuple,
     Optional,
-    Sequence,
-    Set,
-    Tuple,
     Union,
     cast,
 )
@@ -50,7 +45,7 @@ class EncodedSentence(Sentence):
 class EncodingStrategy(ABC):
     """The encoding of the head and tail entities in a sentence with a relation annotation."""
 
-    special_tokens: Set[str] = set()
+    special_tokens: set[str] = set()
 
     def __init__(self, add_special_tokens: bool = False) -> None:
         self.add_special_tokens = add_special_tokens
@@ -84,7 +79,7 @@ class EntityMask(EncodingStrategy):
         - "Larry Page and [TAIL] founded [HEAD]"  -> Relation(head='Google', tail='Sergey Brin').
     """
 
-    special_tokens: Set[str] = {"[HEAD]", "[TAIL]"}
+    special_tokens: set[str] = {"[HEAD]", "[TAIL]"}
 
     def encode_head(self, head_span: Span, label: Label) -> str:
         return "[HEAD]"
@@ -126,7 +121,7 @@ class EntityMarker(EncodingStrategy):
             -> Relation(head='Google', tail='Sergey Brin').
     """
 
-    special_tokens: Set[str] = {"[HEAD]", "[/HEAD]", "[TAIL]", "[/TAIL]"}
+    special_tokens: set[str] = {"[HEAD]", "[/HEAD]", "[TAIL]", "[/TAIL]"}
 
     def encode_head(self, head: Span, label: Label) -> str:
         space_tokenized_text: str = " ".join(token.text for token in head)
@@ -254,14 +249,16 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         embeddings: DocumentEmbeddings,
         label_dictionary: Dictionary,
         label_type: str,
-        entity_label_types: Union[str, Sequence[str], Dict[str, Optional[Set[str]]]],
-        entity_pair_labels: Optional[Set[Tuple[str, str]]] = None,
+        entity_label_types: Union[str, Sequence[str], dict[str, Optional[set[str]]]],
+        entity_pair_labels: Optional[set[tuple[str, str]]] = None,
         entity_threshold: Optional[float] = None,
+        max_allowed_tokens_between_entities: Optional[int] = 20,
+        max_surrounding_context_length: Optional[int] = 10,
         cross_augmentation: bool = True,
         encoding_strategy: EncodingStrategy = TypedEntityMarker(),
         zero_tag_value: str = "O",
         allow_unk_tag: bool = True,
-        **classifierargs,
+        **classifierargs: Any,
     ) -> None:
         """Initializes a `RelationClassifier`.
 
@@ -272,6 +269,8 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
             entity_label_types: A label type or sequence of label types of the required relation entities. You can also specify a label filter in a dictionary with the label type as key and the valid entity labels as values in a set. E.g. to use only 'PER' and 'ORG' labels from a NER-tagger: `{'ner': {'PER', 'ORG'}}`. To use all labels from 'ner', pass 'ner'.
             entity_pair_labels: A set of valid relation entity pair combinations, used as relation candidates. Specify valid entity pairs in a set of tuples of labels (<HEAD>, <TAIL>). E.g. for the `born_in` relation, only relations from 'PER' to 'LOC' make sense. Here, relations from 'PER' to 'PER' are not meaningful, so it is advised to specify the `entity_pair_labels` as `{('PER', 'ORG')}`. This setting may help to reduce the number of relation candidates. Leaving this parameter as `None` (default) disables the relation-candidate-filter, i.e. the model classifies the relation for each entity pair in the cross product of *all* entity pairs (inefficient).
             entity_threshold: Only pre-labelled entities above this threshold are taken into account by the model.
+            max_allowed_tokens_between_entities: The maximum allowed number of allowed tokens between entities. All other entity pairs are filtered from consideration. If `None`, the filter will be disabled.
+            max_surrounding_context_length: The maximum length of context around entity pairs that will be considered. The context, in between the entity pairs will always be included. If `None`, the filter will be disabled.
             cross_augmentation: If `True`, use cross augmentation to transform `Sentence`s into `EncodedSentenece`s. When cross augmentation is enabled, the transformation functions, e.g. `transform_corpus`, generate an encoded sentence for each entity pair in the cross product of all entities in the original sentence. When disabling cross augmentation, the transform functions only generate  encoded sentences for each gold relation annotation in the original sentence.
             encoding_strategy: An instance of a class conforming the :class:`EncodingStrategy` protocol
             zero_tag_value: The label to use for out-of-class relations
@@ -298,7 +297,7 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         )
 
         if isinstance(entity_label_types, str):
-            self.entity_label_types: Dict[str, Optional[Set[str]]] = {entity_label_types: None}
+            self.entity_label_types: dict[str, Optional[set[str]]] = {entity_label_types: None}
         elif isinstance(entity_label_types, Sequence):
             self.entity_label_types = {entity_label_type: None for entity_label_type in entity_label_types}
         else:
@@ -307,6 +306,8 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         self.entity_pair_labels = entity_pair_labels
 
         self.entity_threshold = entity_threshold
+        self.max_allowed_tokens_between_entities = max_allowed_tokens_between_entities
+        self.max_surrounding_context_length = max_surrounding_context_length
         self.cross_augmentation = cross_augmentation
         self.encoding_strategy = encoding_strategy
 
@@ -316,7 +317,7 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
             and self.encoding_strategy.special_tokens
             and isinstance(self.embeddings, TransformerDocumentEmbeddings)
         ):
-            special_tokens: List[str] = list(self.encoding_strategy.special_tokens)
+            special_tokens: list[str] = list(self.encoding_strategy.special_tokens)
             tokenizer = self.embeddings.tokenizer
             tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
             self.embeddings.model.resize_token_embeddings(len(tokenizer))
@@ -355,7 +356,7 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
     def _entity_pair_permutations(
         self,
         sentence: Sentence,
-    ) -> Iterator[Tuple[_Entity, _Entity, Optional[str]]]:
+    ) -> Iterator[tuple[_Entity, _Entity, Optional[str]]]:
         """Yields all valid entity pair permutations (relation candidates).
 
         If the passed sentence contains relation annotations,
@@ -370,10 +371,10 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         Yields:
             Tuples of (HEAD, TAIL, gold_label): The head and tail `_Entity`s` have span references to the passed sentence.
         """
-        valid_entities: List[_Entity] = list(self._valid_entities(sentence))
+        valid_entities: list[_Entity] = list(self._valid_entities(sentence))
 
         # Use a dictionary to find gold relation annotations for a given entity pair
-        relation_to_gold_label: Dict[str, str] = {
+        relation_to_gold_label: dict[str, str] = {
             relation.unlabeled_identifier: relation.get_label(self.label_type, zero_tag_value=self.zero_tag_value).value
             for relation in sentence.get_relations(self.label_type)
         }
@@ -398,12 +399,41 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
 
             yield head, tail, gold_label
 
+    @staticmethod
+    def _truncate_context_around_entities(
+        encoded_sentence_tokens: list[str],
+        head_idx: int,
+        tail_idx: int,
+        context_length: int,
+    ) -> list[str]:
+        """Truncates the encoded sentence to include the head and tail entity and their surrounding context.
+
+        The context, in between the entity pairs will always be included.
+
+        Args:
+            encoded_sentence_tokens: The list of tokens corresponding to the encoded sentence.
+            head_idx: The index of the head entity in the token list.
+            tail_idx: The index of the tail entity in the token list.
+            context_length: The maximum number of tokens to include as surrounding context around the head and tail entities.
+
+        Returns:
+            The tokens of the truncated sentence.
+        """
+        begin_slice: int = min(head_idx, tail_idx)
+        end_slice: int = max(head_idx, tail_idx)
+
+        # Preserve context around the entities. Always include their in-between context.
+        begin_slice = max(begin_slice - context_length, 0)
+        end_slice = min(end_slice + context_length + 1, len(encoded_sentence_tokens))
+
+        return encoded_sentence_tokens[begin_slice:end_slice]
+
     def _encode_sentence(
         self,
         head: _Entity,
         tail: _Entity,
         gold_label: Optional[str] = None,
-    ) -> EncodedSentence:
+    ) -> Optional[EncodedSentence]:
         """Returns a new Sentence object with masked/marked head and tail spans according to the encoding strategy.
 
         If provided, the encoded sentence also has the corresponding gold label annotation from :attr:`~label_type`.
@@ -419,19 +449,29 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         original_sentence: Sentence = head.span.sentence
         assert original_sentence is tail.span.sentence, "The head and tail need to come from the same sentence."
 
+        # Sanity check: Do not create a labeled span if one entity contains the other
+        if head.span[0].idx <= tail.span[0].idx and head.span[-1].idx >= tail.span[-1].idx:
+            return None
+        if head.span[0].idx >= tail.span[0].idx and head.span[-1].idx <= tail.span[-1].idx:
+            return None
+
         # Pre-compute non-leading head and tail tokens for entity masking
-        non_leading_head_tokens: List[Token] = head.span.tokens[1:]
-        non_leading_tail_tokens: List[Token] = tail.span.tokens[1:]
+        non_leading_head_tokens: list[Token] = head.span.tokens[1:]
+        non_leading_tail_tokens: list[Token] = tail.span.tokens[1:]
 
         # We can not use the plaintext of the head/tail span in the sentence as the mask/marker
         # since there may be multiple occurrences of the same entity mentioned in the sentence.
         # Therefore, we use the span's position in the sentence.
-        encoded_sentence_tokens: List[str] = []
+        encoded_sentence_tokens: list[str] = []
+        head_idx: Optional[int] = None
+        tail_idx: Optional[int] = None
         for token in original_sentence:
             if token is head.span[0]:
+                head_idx = len(encoded_sentence_tokens)
                 encoded_sentence_tokens.append(self.encoding_strategy.encode_head(head.span, head.label))
 
             elif token is tail.span[0]:
+                tail_idx = len(encoded_sentence_tokens)
                 encoded_sentence_tokens.append(self.encoding_strategy.encode_tail(tail.span, tail.label))
 
             elif all(
@@ -439,6 +479,27 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
                 for non_leading_entity_token in itertools.chain(non_leading_head_tokens, non_leading_tail_tokens)
             ):
                 encoded_sentence_tokens.append(token.text)
+
+        msg: str
+        if head_idx is None:
+            msg = f"The head entity ({head!r}) is not located inside the original sentence ({original_sentence!r})."
+            raise AssertionError(msg)
+        if tail_idx is None:
+            msg = f"The tail entity ({tail!r}) is not located inside the original sentence ({original_sentence!r})."
+            raise AssertionError(msg)
+
+        # Filter cases in which the distance between the two entities is too large
+        if (
+            self.max_allowed_tokens_between_entities is not None
+            and abs(head_idx - tail_idx) > self.max_allowed_tokens_between_entities
+        ):
+            return None
+
+        # Remove excess tokens left and right of entity pair to make encoded sentence shorter
+        if self.max_surrounding_context_length is not None:
+            encoded_sentence_tokens = self._truncate_context_around_entities(
+                encoded_sentence_tokens, head_idx, tail_idx, self.max_surrounding_context_length
+            )
 
         # Create masked sentence
         encoded_sentence: EncodedSentence = EncodedSentence(
@@ -450,13 +511,14 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
             # Using the sentence label instead of annotating a separate `Relation` object is easier to manage since,
             # during prediction, the forward pass does not need any knowledge about the entities in the sentence.
             encoded_sentence.add_label(typename=self.label_type, value=gold_label, score=1.0)
+
         encoded_sentence.copy_context_from_sentence(original_sentence)
         return encoded_sentence
 
     def _encode_sentence_for_inference(
         self,
         sentence: Sentence,
-    ) -> Iterator[Tuple[EncodedSentence, Relation]]:
+    ) -> Iterator[tuple[EncodedSentence, Relation]]:
         """Create Encoded Sentences and Relation pairs for Inference.
 
         Yields encoded sentences annotated with their gold relation and
@@ -474,13 +536,15 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         Returns: Encoded sentences annotated with their gold relation and the corresponding relation in the original sentence
         """
         for head, tail, gold_label in self._entity_pair_permutations(sentence):
-            masked_sentence: EncodedSentence = self._encode_sentence(
+            masked_sentence: Optional[EncodedSentence] = self._encode_sentence(
                 head=head,
                 tail=tail,
                 gold_label=gold_label if gold_label is not None else self.zero_tag_value,
             )
             original_relation: Relation = Relation(first=head.span, second=tail.span)
-            yield masked_sentence, original_relation
+
+            if masked_sentence is not None:
+                yield masked_sentence, original_relation
 
     def _encode_sentence_for_training(self, sentence: Sentence) -> Iterator[EncodedSentence]:
         """Create Encoded Sentences and Relation pairs for Training.
@@ -497,15 +561,16 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
                 else:
                     continue  # Skip generated data points that do not express an originally annotated relation
 
-            masked_sentence: EncodedSentence = self._encode_sentence(
+            masked_sentence: Optional[EncodedSentence] = self._encode_sentence(
                 head=head,
                 tail=tail,
                 gold_label=gold_label,
             )
 
-            yield masked_sentence
+            if masked_sentence is not None:
+                yield masked_sentence
 
-    def transform_sentence(self, sentences: Union[Sentence, List[Sentence]]) -> List[EncodedSentence]:
+    def transform_sentence(self, sentences: Union[Sentence, list[Sentence]]) -> list[EncodedSentence]:
         """Transforms sentences into encoded sentences specific to the `RelationClassifier`.
 
         For more information on the internal sentence transformation procedure,
@@ -541,7 +606,7 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         Returns: A dataset of encoded sentences specific to the `RelationClassifier`
         """
         data_loader: DataLoader = DataLoader(dataset, batch_size=1)
-        original_sentences: List[Sentence] = [batch[0] for batch in iter(data_loader)]
+        original_sentences: list[Sentence] = [batch[0] for batch in iter(data_loader)]
         return FlairDatapointDataset(self.transform_sentence(original_sentences))
 
     def transform_corpus(self, corpus: Corpus[Sentence]) -> Corpus[EncodedSentence]:
@@ -568,10 +633,10 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         )
 
     def _get_embedding_for_data_point(self, prediction_data_point: EncodedSentence) -> torch.Tensor:
-        embedding_names: List[str] = self.embeddings.get_names()
+        embedding_names: list[str] = self.embeddings.get_names()
         return prediction_data_point.get_embedding(embedding_names)
 
-    def _get_data_points_from_sentence(self, sentence: EncodedSentence) -> List[EncodedSentence]:
+    def _get_data_points_from_sentence(self, sentence: EncodedSentence) -> list[EncodedSentence]:
         """Returns the encoded sentences to which labels are added.
 
         To encode sentences, use the `transform` function of the `RelationClassifier`.
@@ -597,14 +662,14 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
 
     def predict(
         self,
-        sentences: Union[List[Sentence], List[EncodedSentence], Sentence, EncodedSentence],
+        sentences: Union[list[Sentence], list[EncodedSentence], Sentence, EncodedSentence],
         mini_batch_size: int = 32,
         return_probabilities_for_all_classes: bool = False,
         verbose: bool = False,
         label_name: Optional[str] = None,
         return_loss: bool = False,
         embedding_storage_mode: EmbeddingStorageMode = "none",
-    ) -> Optional[Tuple[torch.Tensor, int]]:
+    ) -> Optional[tuple[torch.Tensor, int]]:
         """Predicts the class labels for the given sentence(s).
 
         Standard `Sentence` objects and `EncodedSentences` specific to the `RelationClassifier` are allowed as input.
@@ -626,14 +691,14 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         if not isinstance(sentences, list):
             sentences = [sentences]
 
-        loss: Optional[Tuple[torch.Tensor, int]]
-        encoded_sentences: List[EncodedSentence]
+        loss: Optional[tuple[torch.Tensor, int]]
+        encoded_sentences: list[EncodedSentence]
 
         if all(isinstance(sentence, EncodedSentence) for sentence in sentences):
             # Deal with the case where all sentences are encoded sentences
 
             # mypy does not infer the type of "sentences" restricted by the if statement
-            encoded_sentences = cast(List[EncodedSentence], sentences)
+            encoded_sentences = cast(list[EncodedSentence], sentences)
             loss = super().predict(
                 encoded_sentences,
                 mini_batch_size=mini_batch_size,
@@ -646,8 +711,8 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
 
         elif all(not isinstance(sentence, EncodedSentence) for sentence in sentences):
             # Deal with the case where all sentences are standard (non-encoded) sentences
-            Sentence.set_context_for_sentences(cast(List[Sentence], sentences))
-            sentences_with_relation_reference: List[Tuple[EncodedSentence, Relation]] = list(
+            Sentence.set_context_for_sentences(cast(list[Sentence], sentences))
+            sentences_with_relation_reference: list[tuple[EncodedSentence, Relation]] = list(
                 itertools.chain.from_iterable(self._encode_sentence_for_inference(sentence) for sentence in sentences)
             )
 
@@ -672,8 +737,34 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
 
         return loss if return_loss else None
 
-    def _get_state_dict(self) -> Dict[str, Any]:
-        model_state: Dict[str, Any] = {
+    def _print_predictions(self, batch, gold_label_type: str) -> list[str]:
+        lines = []
+        for datapoint in batch:
+            # check if there is a label mismatch
+            g = [label.labeled_identifier for label in datapoint.get_labels(gold_label_type)]
+            p = [label.labeled_identifier for label in datapoint.get_labels("predicted")]
+            g.sort()
+            p.sort()
+
+            # if the gold label is O and is correctly predicted as no label, do not print out as this clutters
+            # the output file with trivial predictions
+            if not (
+                len(datapoint.get_labels(gold_label_type)) == 1
+                and datapoint.get_label(gold_label_type).value == "O"
+                and len(datapoint.get_labels("predicted")) == 0
+            ):
+                correct_string = " -> MISMATCH!\n" if g != p else ""
+                eval_line = (
+                    f"{datapoint.text}\n"
+                    f" - Gold: {', '.join(label.value if label.data_point == datapoint else label.labeled_identifier for label in datapoint.get_labels(gold_label_type))}\n"
+                    f" - Pred: {', '.join(label.value if label.data_point == datapoint else label.labeled_identifier for label in datapoint.get_labels('predicted'))}\n"
+                    f"{correct_string}\n"
+                )
+                lines.append(eval_line)
+        return lines
+
+    def _get_state_dict(self) -> dict[str, Any]:
+        model_state: dict[str, Any] = {
             **super()._get_state_dict(),
             "embeddings": self.embeddings.save_embeddings(use_state_dict=False),
             "label_dictionary": self.label_dictionary,
@@ -681,6 +772,8 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
             "entity_label_types": self.entity_label_types,
             "entity_pair_labels": self.entity_pair_labels,
             "entity_threshold": self.entity_threshold,
+            "max_allowed_tokens_between_entities": self.max_allowed_tokens_between_entities,
+            "max_surrounding_context_length": self.max_surrounding_context_length,
             "cross_augmentation": self.cross_augmentation,
             "encoding_strategy": self.encoding_strategy,
             "zero_tag_value": self.zero_tag_value,
@@ -689,7 +782,7 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
         return model_state
 
     @classmethod
-    def _init_model_with_state_dict(cls, state: Dict[str, Any], **kwargs):
+    def _init_model_with_state_dict(cls, state: dict[str, Any], **kwargs):
         return super()._init_model_with_state_dict(
             state,
             embeddings=state["embeddings"],
@@ -698,6 +791,8 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
             entity_label_types=state["entity_label_types"],
             entity_pair_labels=state["entity_pair_labels"],
             entity_threshold=state["entity_threshold"],
+            max_allowed_tokens_between_entities=state.get("max_allowed_tokens_between_entities"),
+            max_surrounding_context_length=state.get("max_surrounding_context_length"),
             cross_augmentation=state["cross_augmentation"],
             encoding_strategy=state["encoding_strategy"],
             zero_tag_value=state["zero_tag_value"],
@@ -719,7 +814,7 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
 
     def get_used_tokens(
         self, corpus: Corpus, context_length: int = 0, respect_document_boundaries: bool = True
-    ) -> typing.Iterable[List[str]]:
+    ) -> typing.Iterable[list[str]]:
         yield from super().get_used_tokens(corpus, context_length, respect_document_boundaries)
         for sentence in _iter_dataset(corpus.get_all_sentences()):
             for span in sentence.get_spans(self.label_type):
@@ -727,7 +822,7 @@ class RelationClassifier(flair.nn.DefaultClassifier[EncodedSentence, EncodedSent
                 yield self.encoding_strategy.encode_tail(span, span.get_label(self.label_type)).split(" ")
 
     @classmethod
-    def load(cls, model_path: Union[str, Path, Dict[str, Any]]) -> "RelationClassifier":
+    def load(cls, model_path: Union[str, Path, dict[str, Any]]) -> "RelationClassifier":
         from typing import cast
 
         return cast("RelationClassifier", super().load(model_path=model_path))

@@ -1,7 +1,8 @@
 import logging
+import re
 import sys
 from abc import ABC, abstractmethod
-from typing import Callable, List
+from typing import Callable, Optional
 
 from segtok.segmenter import split_single
 from segtok.tokenizer import split_contractions, word_tokenizer
@@ -20,7 +21,7 @@ class Tokenizer(ABC):
     """
 
     @abstractmethod
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> list[str]:
         raise NotImplementedError
 
     @property
@@ -57,11 +58,11 @@ class SpacyTokenizer(Tokenizer):
                 "spacy model or the name of the model to load."
             )
 
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> list[str]:
         from spacy.tokens.doc import Doc
 
         doc: Doc = self.model.make_doc(text)
-        words: List[str] = []
+        words: list[str] = []
         for word in doc:
             if len(word.text.strip()) == 0:
                 continue
@@ -79,15 +80,42 @@ class SegtokTokenizer(Tokenizer):
     For further details see: https://github.com/fnl/segtok
     """
 
-    def __init__(self) -> None:
+    def __init__(self, additional_split_characters: Optional[list[str]] = None) -> None:
+        """Initializes the SegtokTokenizer with an optional parameter for additional characters that should always
+        be split.
+
+        The default behavior uses simple rules to split text into tokens. If you want to ensure that certain characters
+        always become their own token, you can change default behavior by setting the ``additional_split_characters``
+        parameter.
+
+        Args:
+            additional_split_characters: An optional list of characters that should always be split. For instance, if
+                you want to make sure that paragraph symbols always become their own token, instantiate with
+                additional_split_characters = ['§']
+        """
+        self.additional_split_characters = additional_split_characters
         super().__init__()
 
-    def tokenize(self, text: str) -> List[str]:
+    def _add_whitespace_around_symbols(self, text, symbols):
+        # Build the regular expression pattern dynamically based on the provided symbols
+        # This will match any character from the symbols list that doesn't have spaces around it
+        symbol_pattern = f"[{re.escape(''.join(symbols))}]"
+
+        # Add space before and after symbols, where necessary
+        # Ensure that we are adding a space only if there isn't one already
+        text = re.sub(r"(\S)(" + symbol_pattern + r")", r"\1 \2", text)  # Space before symbol
+        text = re.sub(r"(" + symbol_pattern + r")(\S)", r"\1 \2", text)  # Space after symbol
+
+        return text
+
+    def tokenize(self, text: str) -> list[str]:
+        if self.additional_split_characters:
+            text = self._add_whitespace_around_symbols(text, self.additional_split_characters)
         return SegtokTokenizer.run_tokenize(text)
 
     @staticmethod
-    def run_tokenize(text: str) -> List[str]:
-        words: List[str] = []
+    def run_tokenize(text: str) -> list[str]:
+        words: list[str] = []
 
         sentences = split_single(text)
         for sentence in sentences:
@@ -105,12 +133,12 @@ class SpaceTokenizer(Tokenizer):
     def __init__(self) -> None:
         super().__init__()
 
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> list[str]:
         return SpaceTokenizer.run_tokenize(text)
 
     @staticmethod
-    def run_tokenize(text: str) -> List[str]:
-        tokens: List[str] = []
+    def run_tokenize(text: str) -> list[str]:
+        tokens: list[str] = []
         word = ""
         index = -1
         for index, char in enumerate(text):
@@ -166,8 +194,8 @@ class JapaneseTokenizer(Tokenizer):
         self.sentence_tokenizer = konoha.SentenceTokenizer()
         self.word_tokenizer = konoha.WordTokenizer(tokenizer, mode=sudachi_mode)
 
-    def tokenize(self, text: str) -> List[str]:
-        words: List[str] = []
+    def tokenize(self, text: str) -> list[str]:
+        words: list[str] = []
 
         sentences = self.sentence_tokenizer.tokenize(text)
         for sentence in sentences:
@@ -184,11 +212,11 @@ class JapaneseTokenizer(Tokenizer):
 class TokenizerWrapper(Tokenizer):
     """Helper class to wrap tokenizer functions to the class-based tokenizer interface."""
 
-    def __init__(self, tokenizer_func: Callable[[str], List[str]]) -> None:
+    def __init__(self, tokenizer_func: Callable[[str], list[str]]) -> None:
         super().__init__()
         self.tokenizer_func = tokenizer_func
 
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> list[str]:
         return self.tokenizer_func(text)
 
     @property
@@ -225,7 +253,7 @@ class SciSpacyTokenizer(Tokenizer):
                 "  Note that the scispacy version and the version of the model must match to work properly!"
             )
 
-        def combined_rule_prefixes() -> List[str]:
+        def combined_rule_prefixes() -> list[str]:
             """Helper function that returns the prefix pattern for the tokenizer.
 
             It is a helper function to accommodate spacy tests that only test prefixes.
@@ -270,9 +298,9 @@ class SciSpacyTokenizer(Tokenizer):
         self.model.tokenizer.prefix_search = prefix_re.search
         self.model.tokenizer.infix_finditer = infix_re.finditer
 
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> list[str]:
         sentence = self.model(text)
-        words: List[str] = []
+        words: list[str] = []
         for word in sentence:
             words.append(word.text)
         return words

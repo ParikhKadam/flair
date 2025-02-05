@@ -23,7 +23,7 @@ document embeddings, including our proposed [Flair embeddings](https://www.aclwe
 * **A PyTorch NLP framework.** Our framework builds directly on [PyTorch](https://pytorch.org/), making it easy to
 train your own models and experiment with new approaches using Flair embeddings and classes.
 
-Now at [version 0.14.0](https://github.com/flairNLP/flair/releases)!
+Now at [version 0.15.1](https://github.com/flairNLP/flair/releases)!
 
 
 ## State-of-the-Art Models
@@ -52,7 +52,7 @@ In your favorite virtual environment, simply do:
 pip install flair
 ```
 
-Flair requires Python 3.8+. 
+Flair requires Python 3.9+. 
 
 ### Example 1: Tag Entities in Text
 
